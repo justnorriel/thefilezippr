@@ -1,8 +1,6 @@
-# thefilezippr - A Go-based File Zipping Tool
+# thefilezippr - A Go-based In-Memory File Zipping Tool
 
-`thefilezippr` is a simple web application built in Go that allows users to upload multiple files, zip them, and download the resulting `.zip` file. It is designed to be lightweight, easy to use, and deployable on modern hosting platforms.
-
-
+`thefilezippr` is a simple web application built in Go that allows users to upload multiple files, zip them, and download the resulting `.zip` file. It is designed to be lightweight, easy to use, and deployable on modern hosting platforms like Vercel with no file system dependencies.
 
 ---
 
@@ -11,7 +9,8 @@
 - **File Upload**: Users can upload multiple files simultaneously.
 - **Zip Creation**: Uploaded files are automatically zipped into a single `.zip` file.
 - **File Download**: Users can download the zipped file directly from the browser.
-- **Temporary Storage**: Uploaded files and zipped archives are stored temporarily and cleaned up periodically.
+- **In-Memory Processing**: All files are processed in memory without saving to disk, making it ideal for serverless environments.
+- **Automatic Cleanup**: Zipped archives are stored temporarily in memory and cleaned up periodically.
 - **Responsive Design**: The web interface is mobile-friendly and works on all devices.
 
 ---
@@ -60,23 +59,39 @@ The application uses the following environment variables for configuration:
 
 | Variable      | Default Value | Description                       |
 |----------------|---------------|-----------------------------------|
-| `UPLOADS_DIR` | `./uploads`   | Directory to store uploaded files.|
-| `ZIPS_DIR`    | `./zips`      | Directory to store zipped files.  |
 | `PORT`        | `8080`        | Port on which the server will run.|
 
 To set environment variables, create a `.env` file in the root directory:
 
 ```
-UPLOADS_DIR=./uploads
-ZIPS_DIR=./zips
 PORT=8080
 ```
 
 ---
 
-## File Cleanup
+## Deployment on Vercel
 
-The application automatically deletes files older than 24 hours from the uploads and zips directories. This cleanup process runs every hour in the background.
+This application is designed to work perfectly with serverless platforms like Vercel:
+
+1. Fork or clone this repository
+2. Connect your GitHub repository to Vercel
+3. Deploy as a Go application
+4. No additional configuration is needed as the app doesn't require file system access
+
+---
+
+## Memory Management
+
+The application stores all zip files in memory and automatically removes files older than 24 hours. This cleanup process runs every hour in the background to prevent memory leaks.
+
+---
+
+## Technical Details
+
+- Uses Go's built-in `archive/zip` package for zip file creation
+- Implements thread-safe in-memory storage with mutex locks for concurrent access
+- All file operations happen in memory without writing to disk
+- Responsive UI with mobile-first design principles
 
 ---
 
@@ -101,4 +116,4 @@ This project is licensed under the MIT License. See the `LICENSE` file for detai
 
 Built with ❤️ using Go.
 
-Inspired by the need for a simple file zipping tool.
+Inspired by the need for a simple file zipping tool for serverless environments.

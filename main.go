@@ -2,43 +2,32 @@ package main
 
 import (
 	"archive/zip"
+	"bytes"
 	"fmt"
 	"io"
 	"log"
 	"net/http"
-	"os"
 	"path/filepath"
+	"sync"
 	"time"
 )
 
-var (
-	uploadsDir = "./uploads" // Default uploads directory
-	zipsDir    = "./zips"    // Default zips directory
-)
+// In-memory storage for zip files with mutex for concurrent access
+type ZipStorage struct {
+	zips  map[string][]byte
+	mutex sync.RWMutex
+}
+
+var zipStorage = ZipStorage{
+	zips: make(map[string][]byte),
+}
 
 func main() {
-	// Set uploads and zips directories from environment variables
-	if dir := os.Getenv("UPLOADS_DIR"); dir != "" {
-		uploadsDir = dir
-	}
-	if dir := os.Getenv("ZIPS_DIR"); dir != "" {
-		zipsDir = dir
-	}
-
-	// Create uploads and zips directories with error handling
-	if err := os.MkdirAll(uploadsDir, 0755); err != nil {
-		log.Fatalf("Failed to create uploads directory: %v", err)
-	}
-	if err := os.MkdirAll(zipsDir, 0755); err != nil {
-		log.Fatalf("Failed to create zips directory: %v", err)
-	}
-
-	// Start a background goroutine to clean up old files every hour
+	// Start a background goroutine to clean up old zip files every hour
 	go func() {
 		for {
-			cleanupOldFiles(uploadsDir, 24*time.Hour) // Cleanup files older than 24 hours
-			cleanupOldFiles(zipsDir, 24*time.Hour)    // Cleanup files older than 24 hours
-			time.Sleep(1 * time.Hour)                 // Run cleanup every hour
+			cleanupOldZips(24 * time.Hour) // Cleanup zips older than 24 hours
+			time.Sleep(1 * time.Hour)      // Run cleanup every hour
 		}
 	}()
 
@@ -52,28 +41,26 @@ func main() {
 	log.Fatal(http.ListenAndServe(":8080", nil))
 }
 
-// Cleanup old files in a directory
-func cleanupOldFiles(dir string, maxAge time.Duration) {
-	files, err := os.ReadDir(dir)
-	if err != nil {
-		log.Printf("Error reading directory %s: %v", dir, err)
-		return
-	}
-
-	for _, file := range files {
-		info, err := file.Info()
-		if err != nil {
-			log.Printf("Error getting file info for %s: %v", file.Name(), err)
-			continue
-		}
-
-		if time.Since(info.ModTime()) > maxAge {
-			err := os.Remove(filepath.Join(dir, file.Name()))
-			if err != nil {
-				log.Printf("Error deleting file %s: %v", file.Name(), err)
-			} else {
-				log.Printf("Deleted old file: %s", file.Name())
-			}
+// Cleanup old zips from memory
+func cleanupOldZips(maxAge time.Duration) {
+	currentTime := time.Now()
+	
+	zipStorage.mutex.Lock()
+	defer zipStorage.mutex.Unlock()
+	
+	for key := range zipStorage.zips {
+		// Extract timestamp from key (assuming key format is "timestamp.zip")
+		timestampStr := key[:len(key)-4] // Remove ".zip"
+        var timestamp int64
+        _, err := fmt.Sscanf(timestampStr, "%d", &timestamp)
+        if err != nil {
+            continue
+        }
+        
+        zipTime := time.Unix(timestamp, 0)
+		if currentTime.Sub(zipTime) > maxAge {
+			delete(zipStorage.zips, key)
+			log.Printf("Deleted old zip: %s", key)
 		}
 	}
 }
@@ -373,16 +360,15 @@ func uploadHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Create a unique folder name based on timestamp
+	// Create a unique filename based on timestamp
 	timestamp := time.Now().Unix()
-	uploadDir := filepath.Join(uploadsDir, fmt.Sprintf("%d", timestamp))
-	if err := os.MkdirAll(uploadDir, 0755); err != nil {
-		http.Error(w, "Error creating upload directory: "+err.Error(), http.StatusInternalServerError)
-		return
-	}
+	zipFilename := fmt.Sprintf("%d.zip", timestamp)
 
-	// Save all uploaded files
-	filePaths := []string{}
+	// Create an in-memory buffer to hold the zip
+	var zipBuffer bytes.Buffer
+	zipWriter := zip.NewWriter(&zipBuffer)
+
+	// Process all uploaded files
 	for _, fileHeader := range files {
 		// Open the uploaded file
 		file, err := fileHeader.Open()
@@ -390,36 +376,39 @@ func uploadHandler(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "Error opening file: "+err.Error(), http.StatusInternalServerError)
 			return
 		}
-		defer file.Close()
 
-		// Create the destination file
-		destPath := filepath.Join(uploadDir, fileHeader.Filename)
-		dest, err := os.Create(destPath)
+		// Read the file data into memory
+		fileData, err := io.ReadAll(file)
+		file.Close() // Close immediately as we've read all data
 		if err != nil {
-			http.Error(w, "Error saving file: "+err.Error(), http.StatusInternalServerError)
-			return
-		}
-		defer dest.Close()
-
-		// Copy the uploaded file to the destination file
-		_, err = io.Copy(dest, file)
-		if err != nil {
-			http.Error(w, "Error saving file: "+err.Error(), http.StatusInternalServerError)
+			http.Error(w, "Error reading file: "+err.Error(), http.StatusInternalServerError)
 			return
 		}
 
-		filePaths = append(filePaths, destPath)
+		// Create a file in the zip
+		zipFile, err := zipWriter.Create(fileHeader.Filename)
+		if err != nil {
+			http.Error(w, "Error creating zip entry: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+
+		// Write the file data to the zip
+		if _, err := zipFile.Write(fileData); err != nil {
+			http.Error(w, "Error writing to zip: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
 	}
 
-	// Create the zip file
-	zipFilename := fmt.Sprintf("%d.zip", timestamp)
-	zipPath := filepath.Join(zipsDir, zipFilename)
-	
-	err = zipFiles(zipPath, filePaths)
-	if err != nil {
-		http.Error(w, "Error creating zip: "+err.Error(), http.StatusInternalServerError)
+	// Close the zip writer to flush all data
+	if err := zipWriter.Close(); err != nil {
+		http.Error(w, "Error finalizing zip: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
+
+	// Store the zip in memory
+	zipStorage.mutex.Lock()
+	zipStorage.zips[zipFilename] = zipBuffer.Bytes()
+	zipStorage.mutex.Unlock()
 
 	// Redirect to the download page
 	http.Redirect(w, r, "/download/"+zipFilename, http.StatusSeeOther)
@@ -428,11 +417,23 @@ func uploadHandler(w http.ResponseWriter, r *http.Request) {
 func downloadHandler(w http.ResponseWriter, r *http.Request) {
 	// Extract the filename from the URL
 	filename := filepath.Base(r.URL.Path)
-	zipPath := filepath.Join(zipsDir, filename)
 
-	// Check if the file exists
-	if _, err := os.Stat(zipPath); os.IsNotExist(err) {
+	// Check if the zip exists in memory
+	zipStorage.mutex.RLock()
+	zipData, exists := zipStorage.zips[filename]
+	zipStorage.mutex.RUnlock()
+
+	if !exists {
 		http.Error(w, "Zip file not found", http.StatusNotFound)
+		return
+	}
+
+	// If direct download requested
+	if r.URL.Query().Get("dl") == "1" {
+		w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=\"%s\"", filename))
+		w.Header().Set("Content-Type", "application/zip")
+		w.Header().Set("Content-Length", fmt.Sprintf("%d", len(zipData)))
+		w.Write(zipData)
 		return
 	}
 
@@ -562,66 +563,6 @@ func downloadHandler(w http.ResponseWriter, r *http.Request) {
 </html>
 	`
 
-	// If direct download requested
-	if r.URL.Query().Get("dl") == "1" {
-		w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=\"%s\"", filename))
-		w.Header().Set("Content-Type", "application/zip")
-		http.ServeFile(w, r, zipPath)
-		return
-	}
-
-	// Otherwise show the success page
+	// Show the success page
 	fmt.Fprint(w, html)
-}
-
-func zipFiles(zipPath string, filePaths []string) error {
-	// Create a new zip file
-	zipFile, err := os.Create(zipPath)
-	if err != nil {
-		return err
-	}
-	defer zipFile.Close()
-
-	// Create a new zip writer
-	zipWriter := zip.NewWriter(zipFile)
-	defer zipWriter.Close()
-
-	// Add files to the zip
-	for _, filePath := range filePaths {
-		// Open the file
-		file, err := os.Open(filePath)
-		if err != nil {
-			return err
-		}
-		defer file.Close()
-
-		// Get file info
-		info, err := file.Stat()
-		if err != nil {
-			return err
-		}
-
-		// Create a zip header
-		header, err := zip.FileInfoHeader(info)
-		if err != nil {
-			return err
-		}
-
-		// Set the name to just the filename without the full path
-		header.Name = filepath.Base(filePath)
-
-		// Create the file in the zip
-		writer, err := zipWriter.CreateHeader(header)
-		if err != nil {
-			return err
-		}
-
-		// Copy the file to the zip
-		_, err = io.Copy(writer, file)
-		if err != nil {
-			return err
-		}
-	}
-
-	return nil
 }
