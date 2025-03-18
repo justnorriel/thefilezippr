@@ -2,7 +2,7 @@
 
 `thefilezippr` is a simple web application built in Go that allows users to upload multiple files, zip them, and download the resulting `.zip` file. It is designed to be lightweight, easy to use, and deployable on modern hosting platforms.
 
-![Demo](https://via.placeholder.com/800x400.png?text=Demo+Image+Here) <!-- Add a demo image if available -->
+
 
 ---
 
